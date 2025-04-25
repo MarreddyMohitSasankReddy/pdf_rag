@@ -1,10 +1,6 @@
-gradio
+streamlit
 langchain
-langchain-core
-langchain-community
-langchain-chroma
-langchain-ollama
-ollama
-PyPDF2
-chromadb
+faiss-cpu
+pypdf
 sentence-transformers
+google-generativeai

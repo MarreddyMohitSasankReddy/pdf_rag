@@ -1,94 +1,77 @@
-import gradio as gr
-from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langchain_chroma import Chroma
-from langchain_core.prompts import PromptTemplate
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.documents import Document
-from typing import List, Dict, Any
-import time
+import os
+import tempfile
+import streamlit as st
+from langchain.vectorstores import FAISS
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.chains import RetrievalQA
+from langchain.llms.google_genai import ChatGoogleGenerativeAI
+from dotenv import load_dotenv
 
-# Define the prompt template
-template = """
-You are an intelligent assistant designed to provide accurate and helpful answers based on the context provided. Follow these guidelines:
-1. Use only the information from the context to answer the question.
-2. If the context does not contain enough information to answer the question, say "I don't know" and do not make up an answer.
-3. Be concise and specific in your response.
-4. Always end your answer with "Thanks for asking!" to maintain a friendly tone.
+# Load environment variables
+load_dotenv()
+GOOGLE_API_KEY = os.getenv("AIzaSyBm2i6wTD9IuPFDvfuOnYc3SBzpo7R2Zjc")
+if not GOOGLE_API_KEY:
+    st.error("Please set your GOOGLE_API_KEY as an environment variable.")
+    st.stop()
 
-Context: {context}
+st.set_page_config(page_title="PDF RAG with Gemini 2.0 Flash", layout="wide")
+st.title("📄🤖 PDF RAG with Gemini 2.0 Flash")
 
-Question: {question}
+# Sidebar
+with st.sidebar:
+    st.header("Settings")
+    chunk_size = st.slider("Chunk size", 200, 1500, 500)
+    chunk_overlap = st.slider("Chunk overlap", 0, 300, 50)
+    model_name = "models/gemini-1.5-flash"
 
-Answer:
-"""
-custom_rag_prompt = PromptTemplate.from_template(template)
+uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
 
-# Initialize models and vector store
-model = ChatOllama(model="gemma3:4b", temperature=0.5)
-embeddings = OllamaEmbeddings(model="nomic-embed-text")
-vector_store = Chroma(embedding_function=embeddings)
+if uploaded_file:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(uploaded_file.read())
+        tmp_path = tmp.name
 
-# Initialize text splitter
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,
-    chunk_overlap=200,
-    add_start_index=True,
-)
+    # Load and split PDF
+    st.info("Processing PDF...")
+    loader = PyPDFLoader(tmp_path)
+    documents = loader.load()
 
-class State:
-    def __init__(self, question: str):
-        self.question = question
-        self.context: List[Document] = []
-        self.answer: str = ""
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size, chunk_overlap=chunk_overlap
+    )
+    split_docs = text_splitter.split_documents(documents)
 
-def retrieve(state: State):
-    state.context = vector_store.similarity_search(state.question)
-    return state
+    # Embedding and Vector DB
+    st.info("Creating vector index...")
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    vectordb = FAISS.from_documents(split_docs, embeddings)
 
-def generate(state: State):
-    docs_content = "\n\n".join(doc.page_content for doc in state.context)
-    messages = custom_rag_prompt.invoke({"question": state.question, "context": docs_content})
-    response = model.invoke(messages)
-    state.answer = response
-    return state
+    retriever = vectordb.as_retriever()
 
-def workflow(state_input: Dict[str, Any]) -> Dict[str, Any]:
-    state = State(state_input["question"])
-    state = retrieve(state)
-    state = generate(state)
-    return {"context": state.context, "answer": state.answer}
+    # Gemini 2.0 Flash LLM
+    llm = ChatGoogleGenerativeAI(
+        model=model_name,
+        temperature=0.3,
+        google_api_key=GOOGLE_API_KEY
+    )
 
-def process_pdfs(files):
-    status_messages = []
-    for file in files:
-        loader = PyPDFLoader(file.name)
-        pages = loader.load()
-        all_splits = text_splitter.split_documents(pages)
-        document_ids = vector_store.add_documents(documents=all_splits)
-        status_messages.append(f"Processed {file.name} and added to database!")
-    return "\n".join(status_messages)
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=retriever,
+        return_source_documents=True
+    )
 
-def ask_question(question):
-    result = workflow({"question": question})
-    context = "\n\n".join(doc.page_content for doc in result["context"])
-    answer = result["answer"].content
-    return context, answer
+    query = st.text_input("Ask a question based on the PDF:")
 
-# Gradio interface
-with gr.Blocks() as demo:
-    gr.Markdown("# PDF Query Interface")
-    with gr.Tab("Upload PDFs"):
-        pdf_input = gr.File(label="Upload PDFs", file_count="multiple")
-        upload_status = gr.Textbox(label="Status")
-        upload_button = gr.Button("Upload and Process")
-    with gr.Tab("Ask Question"):
-        question_input = gr.Textbox(label="Your Question")
-        context_output = gr.Textbox(label="Context", lines=10)
-        answer_output = gr.Textbox(label="Answer", lines=5)
-        ask_button = gr.Button("Ask")
+    if query:
+        result = qa_chain({"query": query})
+        st.subheader("Answer")
+        st.write(result["result"])
 
-    upload_button.click(process_pdfs, inputs=pdf_input, outputs=upload_status)
-    ask_button.click(ask_question, inputs=question_input, outputs=[context_output, answer_output])
+        with st.expander("Source Chunks"):
+            for doc in result["source_documents"]:
+                st.markdown(doc.page_content)
 
-demo.launch()
+    os.unlink(tmp_path)
