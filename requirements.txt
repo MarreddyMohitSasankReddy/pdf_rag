@@ -1,0 +1,10 @@
+gradio
+langchain
+langchain-core
+langchain-community
+langchain-chroma
+langchain-ollama
+ollama
+PyPDF2
+chromadb
+sentence-transformers
